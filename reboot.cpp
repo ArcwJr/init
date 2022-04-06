@@ -542,8 +542,7 @@ bool HandlePowerctlMessage(const std::string& command) {
             // adb reboot fastboot should boot into bootloader for devices not
             // supporting logical partitions.
             if (reboot_target == "fastboot" &&
-                !android::base::GetBoolProperty("ro.boot.dynamic_partitions", false) &&
-                !android::base::GetBoolProperty("ro.fastbootd.available", false)) {
+                !android::base::GetBoolProperty("ro.boot.dynamic_partitions", false)) {
                 reboot_target = "bootloader";
             }
             // When rebooting to the bootloader notify the bootloader writing
@@ -601,12 +600,6 @@ bool HandlePowerctlMessage(const std::string& command) {
     for (const auto& s : ServiceList::GetInstance()) {
         s->UnSetExec();
     }
-
-    // We no longer process messages about properties changing coming from property service, so we
-    // need to tell property service to stop sending us these messages, otherwise it'll fill the
-    // buffers and block indefinitely, causing future property sets, including those that init makes
-    // during shutdown in Service::NotifyStateChange() to also block indefinitely.
-    SendStopSendingMessagesMessage();
 
     return true;
 }

@@ -29,6 +29,7 @@
 #include <android-base/stringprintf.h>
 
 #include "init.h"
+#include "property_service.h"
 #include "service.h"
 
 using android::base::StringPrintf;
@@ -60,7 +61,9 @@ static bool ReapOneProcess() {
     std::string wait_string;
     Service* service = nullptr;
 
-    if (SubcontextChildReap(pid)) {
+    if (PropertyChildReap(pid)) {
+        name = "Async property child";
+    } else if (SubcontextChildReap(pid)) {
         name = "Subcontext";
     } else {
         service = ServiceList::GetInstance().FindService(pid, &Service::pid);

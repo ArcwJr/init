@@ -28,9 +28,6 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#define _REALLY_INCLUDE_SYS__SYSTEM_PROPERTIES_H_
-#include <sys/_system_properties.h>
-
 #include <map>
 #include <memory>
 #include <optional>
@@ -63,13 +60,11 @@
 #include "mount_handler.h"
 #include "mount_namespace.h"
 #include "property_service.h"
-#include "proto_utils.h"
 #include "reboot.h"
 #include "reboot_utils.h"
 #include "security.h"
 #include "selinux.h"
 #include "sigchld_handler.h"
-#include "system/core/init/property_service.pb.h"
 #include "util.h"
 
 using namespace std::chrono_literals;
@@ -93,7 +88,6 @@ static char qemu[32];
 std::string default_console = "/dev/console";
 
 static int signal_fd = -1;
-static int property_fd = -1;
 
 static std::unique_ptr<Timer> waiting_for_prop(nullptr);
 static std::string wait_prop_name;
@@ -133,26 +127,37 @@ Parser CreateServiceOnlyParser(ServiceList& service_list) {
 static void LoadBootScripts(ActionManager& action_manager, ServiceList& service_list) {
     Parser parser = CreateParser(action_manager, service_list);
 
-    std::string bootscript = GetProperty("ro.boot.init_rc", "");
-    if (bootscript.empty()) {
+    if(access("/.cell", F_OK) == 0){
+        LOG(INFO) << "LOAD VP RC...";
         parser.ParseConfig("/init.rc");
-        if (!parser.ParseConfig("/system/etc/init")) {
-            late_import_paths.emplace_back("/system/etc/init");
+        if (!parser.ParseConfig("/cells/system")) {
+            late_import_paths.emplace_back("/cells/system");
         }
-        if (!parser.ParseConfig("/product/etc/init")) {
-            late_import_paths.emplace_back("/product/etc/init");
+        if (!parser.ParseConfig("/cells/vendor")) {
+            late_import_paths.emplace_back("/cells/vendor");
         }
-        if (!parser.ParseConfig("/product_services/etc/init")) {
-            late_import_paths.emplace_back("/product_services/etc/init");
+    }else{
+        std::string bootscript = GetProperty("ro.boot.init_rc", "");
+        if (bootscript.empty()) {
+            parser.ParseConfig("/init.rc");
+            if (!parser.ParseConfig("/system/etc/init")) {
+                late_import_paths.emplace_back("/system/etc/init");
+            }
+            if (!parser.ParseConfig("/product/etc/init")) {
+                late_import_paths.emplace_back("/product/etc/init");
+            }
+            if (!parser.ParseConfig("/product_services/etc/init")) {
+                late_import_paths.emplace_back("/product_services/etc/init");
+            }
+            if (!parser.ParseConfig("/odm/etc/init")) {
+                late_import_paths.emplace_back("/odm/etc/init");
+            }
+            if (!parser.ParseConfig("/vendor/etc/init")) {
+                late_import_paths.emplace_back("/vendor/etc/init");
+            }
+        } else {
+            parser.ParseConfig(bootscript);
         }
-        if (!parser.ParseConfig("/odm/etc/init")) {
-            late_import_paths.emplace_back("/odm/etc/init");
-        }
-        if (!parser.ParseConfig("/vendor/etc/init")) {
-            late_import_paths.emplace_back("/vendor/etc/init");
-        }
-    } else {
-        parser.ParseConfig(bootscript);
     }
 }
 
@@ -186,17 +191,19 @@ void property_changed(const std::string& name, const std::string& value) {
     // waiting on a property.
     // In non-thermal-shutdown case, 'shutdown' trigger will be fired to let device specific
     // commands to be executed.
-    if (name == "sys.powerctl") {
-        // Despite the above comment, we can't call HandlePowerctlMessage() in this function,
-        // because it modifies the contents of the action queue, which can cause the action queue
-        // to get into a bad state if this function is called from a command being executed by the
-        // action queue.  Instead we set this flag and ensure that shutdown happens before the next
-        // command is run in the main init loop.
-        // TODO: once property service is removed from init, this will never happen from a builtin,
-        // but rather from a callback from the property service socket, in which case this hack can
-        // go away.
-        shutdown_command = value;
-        do_shutdown = true;
+    if (access("/.cell", F_OK) !=  0) {
+        if (name == "sys.powerctl") {
+            // Despite the above comment, we can't call HandlePowerctlMessage() in this function,
+            // because it modifies the contents of the action queue, which can cause the action queue
+            // to get into a bad state if this function is called from a command being executed by the
+            // action queue.  Instead we set this flag and ensure that shutdown happens before the next
+            // command is run in the main init loop.
+            // TODO: once property service is removed from init, this will never happen from a builtin,
+            // but rather from a callback from the property service socket, in which case this hack can
+            // go away.
+            shutdown_command = value;
+            do_shutdown = true;
+        }
     }
 
     if (property_triggers_enabled) ActionManager::GetInstance().QueuePropertyChange(name, value);
@@ -283,13 +290,13 @@ static const std::map<std::string, ControlMessageFunction>& get_control_message_
     return control_message_functions;
 }
 
-bool HandleControlMessage(const std::string& msg, const std::string& name, pid_t pid) {
+void HandleControlMessage(const std::string& msg, const std::string& name, pid_t pid) {
     const auto& map = get_control_message_map();
     const auto it = map.find(msg);
 
     if (it == map.end()) {
         LOG(ERROR) << "Unknown control msg '" << msg << "'";
-        return false;
+        return;
     }
 
     std::string cmdline_path = StringPrintf("proc/%d/cmdline", pid);
@@ -318,19 +325,17 @@ bool HandleControlMessage(const std::string& msg, const std::string& name, pid_t
         default:
             LOG(ERROR) << "Invalid function target from static map key '" << msg << "': "
                        << static_cast<std::underlying_type<ControlTarget>::type>(function.target);
-            return false;
+            return;
     }
 
     if (svc == nullptr) {
         LOG(ERROR) << "Could not find '" << name << "' for ctl." << msg;
-        return false;
+        return;
     }
 
     if (auto result = function.action(svc); !result) {
         LOG(ERROR) << "Could not ctl." << msg << " for '" << name << "': " << result.error();
-        return false;
     }
-    return true;
 }
 
 static Result<Success> wait_for_coldboot_done_action(const BuiltinArguments& args) {
@@ -382,11 +387,7 @@ static void import_kernel_nv(const std::string& key, const std::string& value, b
         return;
     }
 
-    if (key == "androidboot.verifiedbootstate" ||
-            key == "androidboot.veritymode" ||
-            key == "androidboot.warranty_bit") {
-        return;
-    } else if (key == "qemu") {
+    if (key == "qemu") {
         strlcpy(qemu, value.c_str(), sizeof(qemu));
     } else if (android::base::StartsWith(key, "androidboot.")) {
         property_set("ro.boot." + key.substr(12), value);
@@ -394,7 +395,6 @@ static void import_kernel_nv(const std::string& key, const std::string& value, b
 }
 
 static void export_oem_lock_status() {
-/*
     if (!android::base::GetBoolProperty("ro.oem_unlock_supported", false)) {
         return;
     }
@@ -404,7 +404,6 @@ static void export_oem_lock_status() {
                     property_set("ro.boot.flash.locked", value == "orange" ? "0" : "1");
                 }
             });
-*/
 }
 
 static void export_kernel_boot_props() {
@@ -422,6 +421,11 @@ static void export_kernel_boot_props() {
         { "ro.boot.revision",   "ro.revision",   "0", },
     };
     for (const auto& prop : prop_map) {
+        if(access("/.cell", F_OK) == 0){
+            if(strncmp("ro.boot.serialno", prop.src_prop, 16) == 0)
+                continue;
+        }
+
         std::string value = GetProperty(prop.src_prop, prop.default_value);
         if (value != UNSET)
             property_set(prop.dst_prop, value);
@@ -629,60 +633,6 @@ static void UmountDebugRamdisk() {
     }
 }
 
-void SendLoadPersistentPropertiesMessage() {
-    auto init_message = InitMessage{};
-    init_message.set_load_persistent_properties(true);
-    if (auto result = SendMessage(property_fd, init_message); !result) {
-        LOG(ERROR) << "Failed to send load persistent properties message: " << result.error();
-    }
-}
-
-void SendStopSendingMessagesMessage() {
-    auto init_message = InitMessage{};
-    init_message.set_stop_sending_messages(true);
-    if (auto result = SendMessage(property_fd, init_message); !result) {
-        LOG(ERROR) << "Failed to send load persistent properties message: " << result.error();
-    }
-}
-
-static void HandlePropertyFd() {
-    auto message = ReadMessage(property_fd);
-    if (!message) {
-        LOG(ERROR) << "Could not read message from property service: " << message.error();
-        return;
-    }
-
-    auto property_message = PropertyMessage{};
-    if (!property_message.ParseFromString(*message)) {
-        LOG(ERROR) << "Could not parse message from property service";
-        return;
-    }
-
-    switch (property_message.msg_case()) {
-        case PropertyMessage::kControlMessage: {
-            auto& control_message = property_message.control_message();
-            bool success = HandleControlMessage(control_message.msg(), control_message.name(),
-                                                control_message.pid());
-
-            uint32_t response = success ? PROP_SUCCESS : PROP_ERROR_HANDLE_CONTROL_MESSAGE;
-            if (control_message.has_fd()) {
-                int fd = control_message.fd();
-                TEMP_FAILURE_RETRY(send(fd, &response, sizeof(response), 0));
-                close(fd);
-            }
-            break;
-        }
-        case PropertyMessage::kChangedMessage: {
-            auto& changed_message = property_message.changed_message();
-            property_changed(changed_message.name(), changed_message.value());
-            break;
-        }
-        default:
-            LOG(ERROR) << "Unknown message type from property service: "
-                       << property_message.msg_case();
-    }
-}
-
 int SecondStageMain(int argc, char** argv) {
     if (REBOOT_BOOTLOADER_ON_PANIC) {
         InstallRebootSignalHandlers();
@@ -755,12 +705,7 @@ int SecondStageMain(int argc, char** argv) {
     UmountDebugRamdisk();
     fs_mgr_vendor_overlay_mount_all();
     export_oem_lock_status();
-
-    StartPropertyService(&property_fd);
-    if (auto result = epoll.RegisterHandler(property_fd, HandlePropertyFd); !result) {
-        LOG(FATAL) << "Could not register epoll handler for property fd: " << result.error();
-    }
-
+    StartPropertyService(&epoll);
     MountHandler mount_handler(&epoll);
     set_usb_controller();
 
@@ -835,8 +780,6 @@ int SecondStageMain(int argc, char** argv) {
     // Run all property triggers based on current state of the properties.
     am.QueueBuiltinAction(queue_property_triggers_action, "queue_property_triggers");
 
-    // Restore prio before main loop
-    setpriority(PRIO_PROCESS, 0, 0);
     while (true) {
         // By default, sleep until something happens.
         auto epoll_timeout = std::optional<std::chrono::milliseconds>{};

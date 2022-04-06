@@ -147,24 +147,6 @@ uevent_socket_rcvbuf_size 8M
     TestUeventdFile(ueventd_file, {{}, {}, {}, {}, false, 8 * 1024 * 1024});
 }
 
-TEST(ueventd_parser, EnabledDisabledLines) {
-    auto ueventd_file = R"(
-modalias_handling enabled
-parallel_restorecon enabled
-modalias_handling disabled
-)";
-
-    TestUeventdFile(ueventd_file, {{}, {}, {}, {}, false, 0, true});
-
-    auto ueventd_file2 = R"(
-parallel_restorecon enabled
-modalias_handling enabled
-parallel_restorecon disabled
-)";
-
-    TestUeventdFile(ueventd_file2, {{}, {}, {}, {}, true, 0, false});
-}
-
 TEST(ueventd_parser, AllTogether) {
     auto ueventd_file = R"(
 
@@ -197,8 +179,6 @@ subsystem test_devpath_dirname
 firmware_directories /more
 
 uevent_socket_rcvbuf_size 6M
-modalias_handling enabled
-parallel_restorecon enabled
 
 #ending comment
 )";
@@ -231,7 +211,7 @@ parallel_restorecon enabled
     size_t uevent_socket_rcvbuf_size = 6 * 1024 * 1024;
 
     TestUeventdFile(ueventd_file, {subsystems, sysfs_permissions, permissions, firmware_directories,
-                                   true, uevent_socket_rcvbuf_size, true});
+                                   false, uevent_socket_rcvbuf_size});
 }
 
 // All of these lines are ill-formed, so test that there is 0 output.
@@ -250,13 +230,6 @@ uevent_socket_rcvbuf_size blah
 
 subsystem #no name
 
-modalias_handling
-modalias_handling enabled enabled
-modalias_handling blah
-
-parallel_restorecon
-parallel_restorecon enabled enabled
-parallel_restorecon blah
 )";
 
     TestUeventdFile(ueventd_file, {});
